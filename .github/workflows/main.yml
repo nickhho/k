@@ -1,0 +1,99 @@
+name: Build Android 12 GKI Kernel 5.10 with AnyKernel3
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - suikernel-stable
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          repository: 'LoggingNewMemory/SuiKernel-android12-5.10'
+          ref: 'suikernel-stable'
+
+      - name: Set Environment Variables
+        run: |
+          echo "BUILD_TIME=$(date +'%Y%m%d-%H%M')" >> $GITHUB_ENV
+          echo "CLANG_VERSION=r416183b" >> $GITHUB_ENV # Clang AOSP standar Android 12
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git ccache automake flex lzop bison gperf build-essential \
+            zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 \
+            libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush \
+            schedtool dpkg-dev liblld-12-dev libssl-dev bc lib32ncurses5-dev \
+            x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev xsltproc \
+            unzip m4 python3 python3-pip libtinfo5
+
+      - name: Download AOSP Clang Toolchain
+        run: |
+          mkdir -p clang
+          cd clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-${{ env.CLANG_VERSION }}.tar.gz
+          tar -xf clang-${{ env.CLANG_VERSION }}.tar.gz
+          rm clang-${{ env.CLANG_VERSION }}.tar.gz
+          cd ..
+
+      - name: Build GKI Kernel
+        run: |
+          export PATH="$(pwd)/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export LLVM=1
+          export LLVM_IAS=1
+
+          make O=out gki_defconfig
+          make -j$(nproc --all) O=out
+
+      - name: Setup AnyKernel3 & Package Flashable Zip
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git --depth=1 AnyKernel3
+          
+          # Salin file kernel hasil kompilasi ke AnyKernel3
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image AnyKernel3/
+          elif [ -f out/arch/arm64/boot/Image.lz4 ]; then
+            cp out/arch/arm64/boot/Image.lz4 AnyKernel3/
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz AnyKernel3/
+          else
+            echo "Kernel Image tidak ditemukan!" && exit 1
+          fi
+
+          # Menyesuaikan konfigurasi AnyKernel3 untuk GKI Android 12 5.10
+          cd AnyKernel3
+          sed -i 's/kernel.string=.*/kernel.string=SuiKernel GKI 5.10/g' anykernel.sh
+          sed -i 's/device.name1=.*/device.name1=generic/g' anykernel.sh
+          sed -i 's/is_slot_device=.*/is_slot_device=auto/g' anykernel.sh
+          
+          # Buat file ZIP AnyKernel3
+          zip -r9 "../SuiKernel-GKI-5.10-${{ env.BUILD_TIME }}.zip" * -x .git README.md *placeholder
+
+      - name: Upload Flashable Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SuiKernel-GKI-5.10-${{ env.BUILD_TIME }}
+          path: SuiKernel-GKI-5.10-*.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: release-${{ env.BUILD_TIME }}
+          name: SuiKernel GKI 5.10 AnyKernel3 ${{ env.BUILD_TIME }}
+          files: SuiKernel-GKI-5.10-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
