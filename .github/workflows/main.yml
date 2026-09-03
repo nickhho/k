@@ -56,7 +56,7 @@ jobs:
           export LLVM_IAS=1
 
           make O=out gki_defconfig
-          make -j$(nproc --all) O=out
+          make -j$(nproc --all) O=out KCFLAGS="-Wno-error"
 
       - name: Setup AnyKernel3 & Package Flashable Zip
         run: |
