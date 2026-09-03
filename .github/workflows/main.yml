@@ -6,7 +6,7 @@ on:
       kernel_name:
         description: "Kernel name"
         required: true
-        default: "Zixine"
+        default: "M-Ameath-MamboSU"
         type: string
 
       kernel_branch:
@@ -43,17 +43,13 @@ jobs:
     env:
       KERNEL_REPO: https://github.com/ramabondanp/android_kernel_common-5.10
       KSU_REPO: https://github.com/RapliVx/KernelSU
-
       KERNEL_DIR: ${{ github.workspace }}/kernel
       OUT_DIR: ${{ github.workspace }}/out
       DIST_DIR: ${{ github.workspace }}/dist
 
     steps:
 
-      # ------------------------------------------------------------
-      # 1. Free runner storage
-      # ------------------------------------------------------------
-      - name: Free disk space
+      - name: Free runner storage
         run: |
           echo "=== DISK BEFORE ==="
           df -h
@@ -68,13 +64,10 @@ jobs:
           echo "=== DISK AFTER ==="
           df -h
 
-      # ------------------------------------------------------------
-      # 2. Install dependencies
-      # ------------------------------------------------------------
       - name: Install build dependencies
         run: |
           sudo apt-get update
-      
+
           sudo apt-get install -y \
             git \
             curl \
@@ -86,6 +79,8 @@ jobs:
             clang \
             llvm \
             lld \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
             zip \
             unzip \
             rsync \
@@ -100,11 +95,18 @@ jobs:
             zstd \
             ccache
 
-      # ------------------------------------------------------------
-      # 3. Checkout kernel
-      # ------------------------------------------------------------
+      - name: Check LLVM toolchain
+        run: |
+          set -e
+          clang --version
+          llvm-as --version
+          ld.lld --version
+          aarch64-linux-gnu-gcc --version
+
       - name: Clone kernel source
         run: |
+          set -e
+
           git clone \
             --depth=1 \
             --branch "${{ inputs.kernel_branch }}" \
@@ -115,107 +117,72 @@ jobs:
 
           echo "=== KERNEL SOURCE ==="
           git log -1 --oneline
-          git branch --show-current
+          echo "Branch: $(git branch --show-current)"
 
-      # ------------------------------------------------------------
-      # 4. Setup KernelSU / MamboSU
-      # ------------------------------------------------------------
-      - name: Add KernelSU MamboSU
-        run: |
-          cd "${KERNEL_DIR}"
-
-          echo "Installing KernelSU branch:"
-          echo "${{ inputs.ksuversion }}"
-
-          curl -LSs \
-            "https://raw.githubusercontent.com/RapliVx/KernelSU/xxksu/kernel/setup.sh" \
-            | bash -s xxksu
-
-          echo ""
-          echo "=== KernelSU files ==="
-
-          if [ -d "KernelSU" ]; then
-            find KernelSU -maxdepth 2 -type f | head -50
-          fi
-
-          if [ -d "drivers/kernelsu" ]; then
-            find drivers/kernelsu -maxdepth 2 -type f | head -50
-          fi
-
-      # ------------------------------------------------------------
-      # 5. Prepare GKI configuration
-      # ------------------------------------------------------------
-      - name: Configure GKI
-        run: |
-          cd "${KERNEL_DIR}"
-
-          export ARCH=arm64
-
-          echo "=== Running GKI defconfig ==="
-
-      - name: Check LLVM toolchain
-        run: |
-          clang --version
-          llvm-as --version
-          ld.lld --version
-
-          make O="${OUT_DIR}" \
-            ARCH=arm64 \
-            LLVM=1 \
-            gki_defconfig
-
-          make -j"$(nproc)" \
-            O="${OUT_DIR}" \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=1
-
-          # --------------------------------------------------------
-          # HZ = 500
-          # --------------------------------------------------------
-          ./scripts/config \
-            --file "${OUT_DIR}/.config" \
-            --enable CONFIG_HZ_500 \
-            --set-val CONFIG_HZ 500
-
-          # --------------------------------------------------------
-          # KernelSU syscall hook requirements
-          # --------------------------------------------------------
-          ./scripts/config \
-            --file "${OUT_DIR}/.config" \
-            --enable CONFIG_KPROBES \
-            --enable CONFIG_KRETPROBES \
-            --enable CONFIG_HAVE_SYSCALL_TRACEPOINTS
-
-          # --------------------------------------------------------
-          # Save configuration
-          # --------------------------------------------------------
-          make O="${OUT_DIR}" \
-            ARCH=arm64 \
-            olddefconfig
-
-          echo ""
-          echo "=== IMPORTANT CONFIG ==="
-
-          grep -E \
-            'CONFIG_HZ(_500)?=|CONFIG_KPROBES=|CONFIG_KRETPROBES=|CONFIG_HAVE_SYSCALL_TRACEPOINTS=|CONFIG_KSU' \
-            "${OUT_DIR}/.config" || true
-
-      # ------------------------------------------------------------
-      # 6. Build GKI
-      # ------------------------------------------------------------
-      - name: Build GKI kernel
+      - name: Verify kernel source
         run: |
           set -e
+          cd "${KERNEL_DIR}"
 
+          echo "=== SOURCE CHECK ==="
+
+          test -f Makefile
+          test -f arch/arm64/configs/gki_defconfig
+          test -f build.config.gki.aarch64
+          test -d drivers
+
+          echo "Makefile: OK"
+          echo "gki_defconfig: OK"
+          echo "build.config.gki.aarch64: OK"
+          echo "drivers/: OK"
+
+      - name: Add KernelSU MamboSU
+        run: |
+          set -e
+          cd "${KERNEL_DIR}"
+
+          echo "=== INSTALLING MAMBO SU / KERNELSU ==="
+          echo "Repository: ${KSU_REPO}"
+          echo "Branch: ${{ inputs.ksuversion }}"
+
+          curl -LSs \
+            "https://raw.githubusercontent.com/RapliVx/KernelSU/${{ inputs.ksuversion }}/kernel/setup.sh" \
+            | bash -s "${{ inputs.ksuversion }}"
+
+          echo ""
+          echo "=== VERIFY KERNELSU ==="
+
+          if [ -L drivers/kernelsu ]; then
+            echo "drivers/kernelsu: symlink OK"
+            readlink -f drivers/kernelsu
+          elif [ -d drivers/kernelsu ]; then
+            echo "drivers/kernelsu: directory OK"
+          else
+            echo "ERROR: KernelSU was not installed"
+            exit 1
+          fi
+
+          grep -n "kernelsu" drivers/Makefile || true
+          grep -n "drivers/kernelsu/Kconfig" drivers/Kconfig || true
+
+      - name: Prepare output directories
+        run: |
+          set -e
+          rm -rf "${OUT_DIR}" "${DIST_DIR}"
+          mkdir -p "${OUT_DIR}" "${DIST_DIR}"
+
+      - name: Configure GKI
+        run: |
+          set -e
           cd "${KERNEL_DIR}"
 
           export ARCH=arm64
           export SUBARCH=arm64
           export LLVM=1
+          export LLVM_IAS=1
 
           echo "========================================"
-          echo "      STARTING GKI KERNEL BUILD"
+          echo "          CONFIGURE GKI"
           echo "========================================"
 
           echo "Kernel : ${{ inputs.kernel_name }}"
@@ -223,84 +190,196 @@ jobs:
           echo "KSU    : ${{ inputs.ksuversion }}"
           echo "HZ     : ${{ inputs.hz }}"
 
-          mkdir -p "${OUT_DIR}"
-          mkdir -p "${DIST_DIR}"
+          # Do not call the gki_defconfig make target directly.
+          # This source contains the actual config file, so copy it
+          # explicitly and let Kconfig normalize it with olddefconfig.
+          cp arch/arm64/configs/gki_defconfig "${OUT_DIR}/.config"
 
-          echo ""
-          echo "=== Configure ==="
+          echo "Copied:"
+          ls -lh "${OUT_DIR}/.config"
 
-          make O="${OUT_DIR}" \
-            ARCH=arm64 \
-            LLVM=1 \
-            gki_defconfig
-
-          echo ""
-          echo "=== Apply HZ 500 ==="
-
-          ./scripts/config \
-            --file "${OUT_DIR}/.config" \
-            --enable CONFIG_HZ_500 \
-            --set-val CONFIG_HZ 500
+          echo "=== Initial olddefconfig ==="
 
           make O="${OUT_DIR}" \
             ARCH=arm64 \
             LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo "=== Build scripts/config ==="
+
+          make O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            scripts
+
+          test -x scripts/config
+
+      - name: Apply kernel configuration
+        run: |
+          set -e
+          cd "${KERNEL_DIR}"
+
+          echo "=== APPLY CONFIG ==="
+
+          # HZ from workflow input
+          case "${{ inputs.hz }}" in
+            250)
+              ./scripts/config --file "${OUT_DIR}/.config" \
+                --enable CONFIG_HZ_250 \
+                --set-val CONFIG_HZ 250
+              ;;
+            300)
+              ./scripts/config --file "${OUT_DIR}/.config" \
+                --enable CONFIG_HZ_300 \
+                --set-val CONFIG_HZ 300
+              ;;
+            500)
+              ./scripts/config --file "${OUT_DIR}/.config" \
+                --enable CONFIG_HZ_500 \
+                --set-val CONFIG_HZ 500
+              ;;
+            1000)
+              ./scripts/config --file "${OUT_DIR}/.config" \
+                --enable CONFIG_HZ_1000 \
+                --set-val CONFIG_HZ 1000
+              ;;
+            *)
+              echo "Invalid HZ"
+              exit 1
+              ;;
+          esac
+
+          # KernelSU syscall-hook related options
+          ./scripts/config --file "${OUT_DIR}/.config" \
+            --enable CONFIG_KPROBES \
+            --enable CONFIG_KRETPROBES \
+            --enable CONFIG_HAVE_SYSCALL_TRACEPOINTS
+
+          echo "=== FINAL olddefconfig ==="
+
+          make O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
             olddefconfig
 
           echo ""
-          echo "=== Start compilation ==="
+          echo "=== IMPORTANT CONFIG ==="
+
+          grep -E \
+            '^CONFIG_HZ(_250|_300|_500|_1000)?=|^CONFIG_KPROBES=|^CONFIG_KRETPROBES=|^CONFIG_HAVE_SYSCALL_TRACEPOINTS=|^CONFIG_KSU=' \
+            "${OUT_DIR}/.config" || true
+
+      - name: Build GKI kernel
+        run: |
+          set -e
+          cd "${KERNEL_DIR}"
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "========================================"
+          echo "       STARTING GKI KERNEL BUILD"
+          echo "========================================"
+
+          echo "Kernel : ${{ inputs.kernel_name }}"
+          echo "Branch : ${{ inputs.kernel_branch }}"
+          echo "KSU    : ${{ inputs.ksuversion }}"
+          echo "HZ     : ${{ inputs.hz }}"
+
+          echo ""
+          echo "=== DISK BEFORE BUILD ==="
+          df -h
 
           make -j"$(nproc)" \
             O="${OUT_DIR}" \
             ARCH=arm64 \
             LLVM=1 \
-            LLVM_IAS=1
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            Image \
+            modules \
+            dtbs
 
           echo ""
-          echo "=== Build finished ==="
+          echo "=== BUILD FINISHED ==="
 
-          find "${OUT_DIR}/arch/arm64/boot" \
-            -maxdepth 2 \
+          ls -lh "${OUT_DIR}/arch/arm64/boot/" || true
+
+      - name: Create GKI Image.lz4
+        run: |
+          set -e
+
+          test -f "${OUT_DIR}/arch/arm64/boot/Image"
+
+          cp "${OUT_DIR}/arch/arm64/boot/Image" "${DIST_DIR}/Image"
+
+          lz4 -f \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            "${DIST_DIR}/Image.lz4"
+
+          if [ -f "${OUT_DIR}/arch/arm64/boot/dts/dtbs.tar" ]; then
+            cp "${OUT_DIR}/arch/arm64/boot/dts/dtbs.tar" "${DIST_DIR}/"
+          fi
+
+          echo "=== KERNEL IMAGES ==="
+          ls -lh "${DIST_DIR}"
+
+      - name: Collect modules
+        run: |
+          set -e
+
+          mkdir -p "${DIST_DIR}/modules"
+
+          find "${OUT_DIR}" \
             -type f \
-            -print
+            -name "*.ko" \
+            -exec cp -t "${DIST_DIR}/modules" {} +
 
-      # ------------------------------------------------------------
-      # 7. Verify output
-      # ------------------------------------------------------------
+          if [ -d "${DIST_DIR}/modules" ]; then
+            echo "=== MODULES ==="
+            find "${DIST_DIR}/modules" -type f -printf '%f\n' | sort
+          fi
+
       - name: Verify build output
         run: |
+          set -e
+
           echo "========================================"
-          echo "          BUILD OUTPUT"
+          echo "          VERIFY BUILD OUTPUT"
           echo "========================================"
+
+          test -f "${DIST_DIR}/Image"
+          test -f "${DIST_DIR}/Image.lz4"
 
           echo ""
           echo "=== DIST ==="
-          find "${DIST_DIR}" -maxdepth 2 -type f -printf '%p\n' | sort || true
+          find "${DIST_DIR}" -type f -printf '%p\n' | sort
 
           echo ""
-          echo "=== SEARCH KERNEL IMAGE ==="
-
-          find "${DIST_DIR}" \
-            -type f \
-            \( \
-              -name "Image" \
-              -o -name "Image.gz" \
-              -o -name "Image.lz4" \
-              -o -name "boot.img" \
-              -o -name "*.ko" \
-            \) \
-            -print || true
+          echo "=== IMAGE INFO ==="
+          file "${DIST_DIR}/Image"
+          file "${DIST_DIR}/Image.lz4"
 
           echo ""
-          echo "=== KERNEL VERSION ==="
+          echo "=== KERNEL RELEASE ==="
+          make -s \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            kernelrelease
 
-          if [ -f "${DIST_DIR}/Image" ]; then
-            file "${DIST_DIR}/Image"
-          fi
+          echo ""
+          echo "=== FINAL CONFIG CHECK ==="
+          grep -E \
+            '^CONFIG_HZ(_250|_300|_500|_1000)?=|^CONFIG_KSU=|^CONFIG_KPROBES=|^CONFIG_KRETPROBES=|^CONFIG_HAVE_SYSCALL_TRACEPOINTS=' \
+            "${OUT_DIR}/.config" || true
 
-      # ------------------------------------------------------------
-      # 8. Package release
-      # ------------------------------------------------------------
       - name: Package kernel
         run: |
           set -e
@@ -308,37 +387,33 @@ jobs:
           DATE=$(date +"%Y%m%d-%H%M")
           ZIP_NAME="${{ inputs.kernel_name }}-GKI-5.10-MamboSU-${DATE}.zip"
 
+          rm -rf release
           mkdir -p release
 
-          # Copy complete GKI distribution
           cp -a "${DIST_DIR}/." release/
 
-          # Add build information
+          cp "${OUT_DIR}/.config" release/kernel.config
+
           cat > release/BUILD_INFO.txt <<EOF
-          Kernel Name : ${{ inputs.kernel_name }}
-          Kernel Repo : ${KERNEL_REPO}
-          Kernel Branch: ${{ inputs.kernel_branch }}
+          Kernel Name   : ${{ inputs.kernel_name }}
+          Kernel Repo   : ${KERNEL_REPO}
+          Kernel Branch : ${{ inputs.kernel_branch }}
+          Kernel Commit : $(cd "${KERNEL_DIR}" && git rev-parse HEAD)
 
-          KernelSU Repo: ${KSU_REPO}
-          KernelSU Branch: ${{ inputs.ksuversion }}
+          KernelSU Repo   : ${KSU_REPO}
+          KernelSU Branch : ${{ inputs.ksuversion }}
 
-          Architecture: arm64
-          Kernel HZ: ${{ inputs.hz }}
+          Architecture : arm64
+          Kernel HZ     : ${{ inputs.hz }}
+          LLVM          : $(clang --version | head -n1)
+          LLD           : $(ld.lld --version | head -n1)
 
-          GitHub Run:
-          ${GITHUB_RUN_NUMBER}
-
-          Commit:
-          $(cd "${KERNEL_DIR}" && git rev-parse HEAD)
-
-          Build Date:
-          $(date -u)
+          GitHub Run : ${GITHUB_RUN_NUMBER}
+          Build Date : $(date -u)
           EOF
 
           cd release
-
           zip -9 -r "../${ZIP_NAME}" .
-
           cd ..
 
           echo "PACKAGE=${ZIP_NAME}" >> "${GITHUB_ENV}"
@@ -347,9 +422,6 @@ jobs:
           echo "=== PACKAGE ==="
           ls -lh "${ZIP_NAME}"
 
-      # ------------------------------------------------------------
-      # 9. Upload artifacts
-      # ------------------------------------------------------------
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
@@ -360,9 +432,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # ------------------------------------------------------------
-      # 10. GitHub Release
-      # ------------------------------------------------------------
       - name: Create GitHub Release
         if: success()
         uses: softprops/action-gh-release@v2
@@ -384,14 +453,14 @@ jobs:
 
             **Configuration**
             - CONFIG_HZ: `${{ inputs.hz }}`
-            - LTO: Thin
+            - LTO: source default / kernel config
 
             **Build**
             - GitHub Run: `${{ github.run_number }}`
             - Commit: `${{ github.sha }}`
 
-            > This is a GKI kernel build. Device-specific boot/vendor_boot
-            > integration may still be required depending on the target device.
+            > This workflow builds the GKI kernel image. Device-specific
+            > boot/vendor_boot integration is not included.
 
           files: |
             ${{ env.PACKAGE }}
