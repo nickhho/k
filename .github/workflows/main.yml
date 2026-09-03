@@ -74,7 +74,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-
+      
           sudo apt-get install -y \
             git \
             curl \
@@ -83,6 +83,9 @@ jobs:
             bison \
             flex \
             build-essential \
+            clang \
+            llvm \
+            lld \
             zip \
             unzip \
             rsync \
@@ -150,9 +153,22 @@ jobs:
 
           echo "=== Running GKI defconfig ==="
 
+      - name: Check LLVM toolchain
+        run: |
+          clang --version
+          llvm-as --version
+          ld.lld --version
+
           make O="${OUT_DIR}" \
             ARCH=arm64 \
+            LLVM=1 \
             gki_defconfig
+
+          make -j"$(nproc)" \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1
 
           # --------------------------------------------------------
           # HZ = 500
