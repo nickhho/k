@@ -189,14 +189,14 @@ jobs:
       # 6. Build GKI
       # ------------------------------------------------------------
       - name: Build GKI kernel
-        env:
-          KBUILD_BUILD_USER: Zixine
-          KBUILD_BUILD_HOST: GitHub-Actions
         run: |
+          set -e
+
           cd "${KERNEL_DIR}"
 
           export ARCH=arm64
           export SUBARCH=arm64
+          export LLVM=1
 
           echo "========================================"
           echo "      STARTING GKI KERNEL BUILD"
@@ -207,16 +207,46 @@ jobs:
           echo "KSU    : ${{ inputs.ksuversion }}"
           echo "HZ     : ${{ inputs.hz }}"
 
-          echo ""
-          echo "=== DISK BEFORE BUILD ==="
-          df -h
+          mkdir -p "${OUT_DIR}"
+          mkdir -p "${DIST_DIR}"
 
-          # Use the kernel's Android 12 GKI build configuration.
-          LTO=thin \
-          BUILD_CONFIG="${KERNEL_DIR}/build.config.gki.aarch64" \
-          OUT_DIR="${OUT_DIR}" \
-          DIST_DIR="${DIST_DIR}" \
-          build/build.sh
+          echo ""
+          echo "=== Configure ==="
+
+          make O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            gki_defconfig
+
+          echo ""
+          echo "=== Apply HZ 500 ==="
+
+          ./scripts/config \
+            --file "${OUT_DIR}/.config" \
+            --enable CONFIG_HZ_500 \
+            --set-val CONFIG_HZ 500
+
+          make O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            olddefconfig
+
+          echo ""
+          echo "=== Start compilation ==="
+
+          make -j"$(nproc)" \
+            O="${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1
+
+          echo ""
+          echo "=== Build finished ==="
+
+          find "${OUT_DIR}/arch/arm64/boot" \
+            -maxdepth 2 \
+            -type f \
+            -print
 
       # ------------------------------------------------------------
       # 7. Verify output
